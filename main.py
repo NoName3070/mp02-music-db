@@ -1,310 +1,250 @@
 """
-main.py
-=======
-CIS 3120 · MP02 — SQL and Database
-Integrator module — application driver
+main.py  —  Integrator
+Driver for the music playlist application.
 
-CONTRACT SUMMARY
-----------------
-Implement the startup sequence, menu loop, and deletion sequence as specified.
-This file is the only entry point for the completed application.
+Startup logic:
+  • If music.db exists on disk  →  open it directly (re-open mode).
+  • Otherwise                   →  build + seed an in-memory DB, back it up
+                                   to music.db, then open that file.
 
-REQUIRED (graded):
-    ✓ Correct imports from schema_data and queries
-    ✓ Startup: open existing music.db OR build + seed + backup on first run
-    ✓ Menu loop with options 1–5 and 0 to exit
-    ✓ Readable tabular output; durations formatted as M:SS
-    ✓ Deletion sequence in correct foreign key order (PlaylistTrack → Track → Artist)
-    ✓ IntegrityError caught and displayed if deletion fails
-
-IMPORTANT:
-    - Do not define schema or query logic here; import from the Author modules.
-    - Do not call build_database() or seed_database() on re-open runs.
-    - The menu loop must continue until the user enters 0.
+All subsequent work uses the file-backed connection so data persists.
 """
 
-import sqlite3
 import os
+import sqlite3
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Imports from Author modules
-# ─────────────────────────────────────────────────────────────────────────────
-
-# TODO: uncomment and complete these import lines once Author 1 and Author 2
-#       have merged their modules into main.
-
-# from schema_data import build_database, seed_database
-# from queries    import (get_playlist_tracks,
-#                         get_tracks_on_no_playlist,
-#                         get_most_added_track,
-#                         get_playlist_durations)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────────────────────────────────────
+from schema_data import build_database, seed_database
+from queries import (
+    get_playlist_tracks,
+    get_tracks_on_no_playlist,
+    get_most_added_track,
+    get_playlist_durations,
+)
 
 DB_PATH = "music.db"
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Output helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fmt_duration(total_seconds):
-    """Convert a total-seconds value to an M:SS string.
-
-    Parameters
-    ----------
-    total_seconds : int or float
-
-    Returns
-    -------
-    str  e.g. 210 → '3:30'
-    """
-    total_seconds = int(total_seconds)
-    mins = total_seconds // 60
-    secs = total_seconds % 60
-    return f"{mins}:{secs:02d}"
+def fmt_duration(seconds):
+    """Convert an integer number of seconds to a 'M:SS' string."""
+    m, s = divmod(int(seconds), 60)
+    return f"{m}:{s:02d}"
 
 
-def divider(char="─", width=60):
-    """Print a horizontal rule."""
-    print(char * width)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Menu option handlers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def show_playlist_tracks(conn):
-    """Menu option 1 — display all tracks on a user-specified playlist."""
-    playlist_name = input("  Enter playlist name: ").strip()
-    # TODO: call get_playlist_tracks(conn, playlist_name)
-    #       Print each row with position, title, artist, and formatted duration.
-    #       If the list is empty, print a message saying no tracks were found.
-    rows = []  # replace with: get_playlist_tracks(conn, playlist_name)
+def print_table(headers, rows, col_widths=None):
+    """Print a simple fixed-width table to stdout."""
     if not rows:
-        print(f"  No tracks found for playlist '{playlist_name}'.")
-        return
-    print(f"\n  {'Pos':>3}  {'Title':<30}  {'Artist':<22}  {'Duration'}")
-    divider()
-    for title, artist, duration_sec, position in rows:
-        print(f"  {position:>3}  {title:<30}  {artist:<22}  {fmt_duration(duration_sec)}")
-
-
-def show_tracks_on_no_playlist(conn):
-    """Menu option 2 — display tracks that belong to no playlist."""
-    # TODO: call get_tracks_on_no_playlist(conn)
-    #       Print each row with track_id, title, and artist name.
-    #       If the list is empty, print a message confirming all tracks are assigned.
-    rows = []  # replace with: get_tracks_on_no_playlist(conn)
-    if not rows:
-        print("  All tracks are assigned to at least one playlist.")
-        return
-    print(f"\n  {'ID':>4}  {'Title':<30}  {'Artist'}")
-    divider()
-    for track_id, title, artist in rows:
-        print(f"  {track_id:>4}  {title:<30}  {artist}")
-
-
-def show_most_added_track(conn):
-    """Menu option 3 — display the track appearing on the most playlists."""
-    # TODO: call get_most_added_track(conn)
-    #       Print the title, artist name, and playlist count.
-    #       If the result is None, print a message that PlaylistTrack is empty.
-    row = None  # replace with: get_most_added_track(conn)
-    if row is None:
-        print("  No playlist assignments found.")
-        return
-    title, artist, count = row
-    print(f"\n  Most-added track: {title} by {artist}")
-    print(f"  Appears on {count} playlist(s).")
-
-
-def show_playlist_durations(conn):
-    """Menu option 4 — display total duration of each playlist, longest first."""
-    # TODO: call get_playlist_durations(conn)
-    #       Print each row with playlist name and total duration formatted as M:SS.
-    #       Duration values are returned in minutes (float); convert to seconds first.
-    rows = []  # replace with: get_playlist_durations(conn)
-    if not rows:
-        print("  No playlist data found.")
-        return
-    print(f"\n  {'Playlist':<30}  {'Total Duration'}")
-    divider()
-    for playlist_name, total_minutes in rows:
-        total_seconds = total_minutes * 60
-        print(f"  {playlist_name:<30}  {fmt_duration(total_seconds)}")
-
-
-def delete_artist(conn):
-    """Menu option 5 — remove an artist and all dependent records.
-
-    Deletion must follow the correct foreign key order:
-        Step 1 — delete PlaylistTrack rows for the artist's tracks
-        Step 2 — delete Track rows for the artist
-        Step 3 — delete the Artist row
-
-    Catches IntegrityError and rolls back if any step fails.
-    """
-    # TODO: prompt the user for an artist_id (integer input).
-    #       Print the artist's name and ask for confirmation before deleting.
-    #       Implement the three-step deletion sequence in the correct FK order.
-    #       Commit after all three steps succeed, or rollback on IntegrityError.
-
-    try:
-        artist_id_input = input("  Enter artist ID to delete: ").strip()
-        artist_id = int(artist_id_input)
-    except ValueError:
-        print("  Invalid input — please enter an integer artist ID.")
+        print("  (no results)\n")
         return
 
-    # Confirm the artist exists before attempting deletion
-    row = conn.execute(
-        "SELECT name FROM Artist WHERE artist_id = ?", (artist_id,)
-    ).fetchone()
-    if row is None:
-        print(f"  No artist found with ID {artist_id}.")
-        return
+    # Auto-compute widths if not provided
+    if col_widths is None:
+        col_widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], len(str(cell)))
 
-    artist_name = row[0]
-    confirm = input(f"  Delete '{artist_name}' (ID {artist_id}) and all their tracks? [yes/no]: ").strip().lower()
-    if confirm != "yes":
-        print("  Deletion cancelled.")
-        return
+    fmt = "  " + "  ".join(f"{{:<{w}}}" for w in col_widths)
+    sep = "  " + "  ".join("-" * w for w in col_widths)
 
-    try:
-        # Step 1 — remove PlaylistTrack rows for this artist's tracks
-        # TODO: write a DELETE statement that removes PlaylistTrack rows
-        #       where track_id IN (SELECT track_id FROM Track WHERE artist_id = ?)
-        conn.execute("""
-            -- TODO: DELETE FROM PlaylistTrack WHERE track_id IN (...)
-            SELECT 1 WHERE 1 = 0
-        """, (artist_id,))
-
-        # Step 2 — remove the artist's Track rows
-        # TODO: write a DELETE statement: DELETE FROM Track WHERE artist_id = ?
-        conn.execute("""
-            -- TODO: DELETE FROM Track WHERE artist_id = ?
-            SELECT 1 WHERE 1 = 0
-        """, (artist_id,))
-
-        # Step 3 — remove the Artist row
-        # TODO: write a DELETE statement: DELETE FROM Artist WHERE artist_id = ?
-        conn.execute("""
-            -- TODO: DELETE FROM Artist WHERE artist_id = ?
-            SELECT 1 WHERE 1 = 0
-        """, (artist_id,))
-
-        conn.commit()
-        print(f"  '{artist_name}' and all associated tracks and playlist assignments removed.")
-
-    except sqlite3.IntegrityError as e:
-        conn.rollback()
-        print(f"  Deletion failed — IntegrityError: {e}")
-    except Exception as e:
-        conn.rollback()
-        print(f"  Deletion failed — {type(e).__name__}: {e}")
+    print(fmt.format(*headers))
+    print(sep)
+    for row in rows:
+        print(fmt.format(*[str(c) for c in row]))
+    print()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Startup
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
-def open_or_build_database():
-    """Return an open sqlite3 connection to the music database.
+def open_connection():
+    """Return a connection to music.db, building it on first run if needed."""
+    if os.path.exists(DB_PATH):
+        print(f"[startup] Existing database found — opening {DB_PATH}.")
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA foreign_keys = ON;")
+        return conn
 
-    If music.db exists on disk, open it directly and print a re-open message.
-    If music.db does not exist, build and seed an in-memory database, back it
-    up to music.db, then open music.db for all subsequent operations.
+    print("[startup] No database found — building from scratch.")
+    mem = sqlite3.connect(":memory:")
+    build_database(mem)
+    seed_database(mem)
 
-    Returns
-    -------
-    sqlite3.Connection  pointing to music.db
-    """
-    # TODO: implement the two-branch startup logic described above.
-    #       Branch 1 (file exists):
-    #           conn = sqlite3.connect(DB_PATH)
-    #           conn.execute("PRAGMA foreign_keys = ON;")
-    #           print a message confirming re-open
-    #           return conn
-    #
-    #       Branch 2 (file does not exist):
-    #           mem_conn = sqlite3.connect(":memory:")
-    #           mem_conn.execute("PRAGMA foreign_keys = ON;")
-    #           build_database(mem_conn)
-    #           seed_database(mem_conn)
-    #           target_conn = sqlite3.connect(DB_PATH)
-    #           mem_conn.backup(target_conn)
-    #           target_conn.close()
-    #           mem_conn.close()
-    #           conn = sqlite3.connect(DB_PATH)
-    #           conn.execute("PRAGMA foreign_keys = ON;")
-    #           print a message confirming first-run build
-    #           return conn
+    target = sqlite3.connect(DB_PATH)
+    mem.backup(target)
+    target.close()
+    mem.close()
 
-    # Placeholder — replace with your implementation
-    print("  [open_or_build_database: TODO — implement startup logic]")
-    conn = sqlite3.connect(":memory:")
+    print(f"[startup] Database written to {DB_PATH}.")
+    conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Menu actions
+# ---------------------------------------------------------------------------
+
+def show_playlist_tracks(conn):
+    rows = conn.execute("SELECT playlist_name FROM Playlist ORDER BY playlist_name").fetchall()
+    if not rows:
+        print("No playlists found.\n")
+        return
+
+    print("\nAvailable playlists:")
+    for i, (name,) in enumerate(rows, 1):
+        print(f"  {i}. {name}")
+
+    choice = input("Enter playlist number: ").strip()
+    try:
+        idx = int(choice) - 1
+        playlist_name = rows[idx][0]
+    except (ValueError, IndexError):
+        print("Invalid choice.\n")
+        return
+
+    results = get_playlist_tracks(conn, playlist_name)
+    print(f"\n  === {playlist_name} ===")
+    formatted = [
+        (r[0], r[1], fmt_duration(r[2]), r[3])
+        for r in results
+    ]
+    print_table(
+        ["Title", "Artist", "Duration", "Pos"],
+        formatted,
+        col_widths=[30, 20, 8, 4],
+    )
+
+
+def show_tracks_on_no_playlist(conn):
+    results = get_tracks_on_no_playlist(conn)
+    print("\n  === Tracks Not on Any Playlist ===")
+    formatted = [(r[0], r[1], fmt_duration(r[2])) for r in results]
+    print_table(["Title", "Artist", "Duration"], formatted, [30, 20, 8])
+
+
+def show_most_added_track(conn):
+    results = get_most_added_track(conn)
+    print("\n  === Most-Added Track ===")
+    print_table(["Title", "Artist", "# Playlists"], results, [30, 20, 11])
+
+
+def show_playlist_durations(conn):
+    results = get_playlist_durations(conn)
+    print("\n  === Playlist Total Durations ===")
+    formatted = [(r[0], fmt_duration(r[1])) for r in results]
+    print_table(["Playlist", "Total Duration"], formatted, [22, 14])
+
+
+def delete_artist(conn):
+    """Prompt for an artist and remove them with all dependent records."""
+    rows = conn.execute(
+        "SELECT artist_id, name FROM Artist ORDER BY name"
+    ).fetchall()
+
+    if not rows:
+        print("No artists in the database.\n")
+        return
+
+    print("\nArtists:")
+    for aid, name in rows:
+        print(f"  [{aid}] {name}")
+
+    choice = input("Enter artist ID to delete: ").strip()
+    try:
+        artist_id = int(choice)
+    except ValueError:
+        print("Invalid ID.\n")
+        return
+
+    # Confirm the artist exists
+    artist = conn.execute(
+        "SELECT name FROM Artist WHERE artist_id = ?", (artist_id,)
+    ).fetchone()
+    if not artist:
+        print(f"No artist with ID {artist_id}.\n")
+        return
+
+    confirm = input(
+        f"Delete '{artist[0]}' and ALL their tracks/playlist entries? (yes/no): "
+    ).strip().lower()
+    if confirm != "yes":
+        print("Deletion cancelled.\n")
+        return
+
+    try:
+        # Step 1 — remove PlaylistTrack rows for this artist's tracks
+        conn.execute("""
+            DELETE FROM PlaylistTrack
+            WHERE track_id IN (
+                SELECT track_id FROM Track WHERE artist_id = ?
+            )
+        """, (artist_id,))
+
+        # Step 2 — remove the artist's Track rows
+        conn.execute(
+            "DELETE FROM Track WHERE artist_id = ?", (artist_id,)
+        )
+
+        # Step 3 — remove the Artist row
+        conn.execute(
+            "DELETE FROM Artist WHERE artist_id = ?", (artist_id,)
+        )
+
+        conn.commit()
+        print(f"Artist '{artist[0]}' and all dependent records removed.\n")
+
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        print(f"Deletion failed due to IntegrityError: {e}\n")
+
+
+# ---------------------------------------------------------------------------
 # Menu loop
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 MENU = """
-╔══════════════════════════════════════════╗
-║      Music Playlist Manager — MP02       ║
-╠══════════════════════════════════════════╣
-║  1  Show all tracks on a playlist        ║
-║  2  Show tracks on no playlist           ║
-║  3  Show most-added track                ║
-║  4  Show playlist durations              ║
-║  5  Delete an artist (and their tracks)  ║
-║  0  Exit                                 ║
-╚══════════════════════════════════════════╝
+╔══════════════════════════════════════╗
+║       Music Playlist Manager         ║
+╠══════════════════════════════════════╣
+║  1. Show all tracks on a playlist    ║
+║  2. Show tracks on no playlist       ║
+║  3. Show most-added track            ║
+║  4. Show playlist durations          ║
+║  5. Delete an artist (cascade)       ║
+║  0. Exit                             ║
+╚══════════════════════════════════════╝
 """
 
-HANDLERS = {
-    "1": show_playlist_tracks,
-    "2": show_tracks_on_no_playlist,
-    "3": show_most_added_track,
-    "4": show_playlist_durations,
-    "5": delete_artist,
-}
+def run():
+    conn = open_connection()
+    print()
 
-
-def run_menu(conn):
-    """Display the menu and dispatch user selections until the user exits."""
     while True:
         print(MENU)
         choice = input("Select an option: ").strip()
 
-        if choice == "0":
-            print("Goodbye.")
+        if choice == "1":
+            show_playlist_tracks(conn)
+        elif choice == "2":
+            show_tracks_on_no_playlist(conn)
+        elif choice == "3":
+            show_most_added_track(conn)
+        elif choice == "4":
+            show_playlist_durations(conn)
+        elif choice == "5":
+            delete_artist(conn)
+        elif choice == "0":
+            print("Goodbye!")
             break
+        else:
+            print("Invalid option — please enter 0–5.\n")
 
-        handler = HANDLERS.get(choice)
-        if handler is None:
-            print(f"  '{choice}' is not a valid option.  Please enter 0–5.")
-            continue
+    conn.close()
 
-        print()
-        handler(conn)
-        print()
-        input("  Press Enter to return to the menu ...")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    conn = open_or_build_database()
-    try:
-        run_menu(conn)
-    finally:
-        conn.close()
+    run()
